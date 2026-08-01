@@ -18,40 +18,26 @@ from state import (
     error_logs, logger, is_link_allowed, save_state,
     is_domain_blocked, log_activity,
     CONN_LIMITER,  # ✅ سقف سراسری تعداد کانکشن هم‌زمان (مشترک با relay_vless.py)
+    # ✅ این ثابت‌ها دیگه اینجا عدد ثابت نیستن — از state.py می‌آن که خودش
+    # اون‌ها رو بر اساس RAM واقعی کانتینر (تشخیص خودکار از cgroup) حساب می‌کنه.
+    # نتیجه: روی سروری با RAM بیشتر، خودکار بافر بزرگ‌تر/سرعت بهتر می‌گیریم؛
+    # روی RAM کم، خودکار محافظه‌کارتر می‌مونیم — بدون نیاز به دستکاری این فایل.
+    XHTTP_BUF, DOWNLINK_QUEUE_MAX,
+    SOCK_BUF_SIZE, FLOW_MIN_HW, FLOW_MAX_HW, FLOW_START_HW,
 )
 from relay_vless import parse_vless_header, check_and_use
 
 router = APIRouter()
 
-# ── ثابت‌ها ────────────────────────────────────────────────────────────────
-XHTTP_BUF = 512 * 1024
-# ✅ فیکس دوم (بعد از تجربه‌ی OOM واقعی زیر بار): ۴۸ هنوز خیلی زیاد بود.
-# بدترین حالت قبلی: 48 × 512KB ≈ 24MB فقط صفِ دانلینک، به‌ازای هر session.
-# با MAX_CONCURRENT_CONNECTIONS جدید (۶۰) این می‌شد تا 1.4GB فقط برای صف‌ها —
-# بدون احتساب بافر سوکت و adaptive-flow. عدد ۱۰ یعنی بدترین حالت هر session
-# فقط ~5MB صف می‌شود؛ چون _AdaptiveFlow و _QuotaGate با batch/backpressure
-# جلوی پر شدن سریع صف رو می‌گیرن، صف کوچیک‌تر throughput واقعی رو محسوس کم
-# نمی‌کنه، فقط سقف بدترین‌حالت رو پایین میاره.
-DOWNLINK_QUEUE_MAX = 10
+# ── ثابت‌های باقیمانده (این‌ها به بافر/حافظه ربطی ندارن، پس ثابتن) ──────────
 SESSION_IDLE_TIMEOUT = 30
 CONNECTED_IDLE_TIMEOUT = 180
 REAPER_INTERVAL = 10
 TCP_CONNECT_TIMEOUT = 10.0
 MAX_PACKET_UP_BODY = 4 * 1024 * 1024
-
-# ── تنظیمات موتور تطبیقی ──────────────────────────────────────────────────
-# ✅ فیکس دوم: از ۱MB به ۵۱۲KB — باز هم کوچیک‌تر کردن بافر کرنل هر کانکشن،
-# برای اینکه بدترین‌حالتِ کلِ session‌ها زیر سقف واقعی RAM بمونه.
-SOCK_BUF_SIZE = 512 * 1024
-
-FLOW_MIN_HW = 256 * 1024
-# ✅ فیکس دوم: از ۴MB به ۲MB — سقف بالای adaptive high-water به‌ازای هر سشن.
-# ترکیب با DOWNLINK_QUEUE_MAX و SOCK_BUF_SIZE جدید، بدترین‌حالت هر session رو
-# از ~30MB به ~8MB می‌رسونه (۱۰×۵۱۲KB صف + ۵۱۲KB×۲ سوکت + ۲MB flow).
-FLOW_MAX_HW = 2 * 1024 * 1024
-FLOW_START_HW = 1 * 1024 * 1024
 FLOW_FAST_DRAIN_MS = 2.0
 FLOW_SLOW_DRAIN_MS = 25.0
+
 
 QUOTA_MIN_BATCH = 32 * 1024
 QUOTA_MAX_BATCH = 1 * 1024 * 1024
