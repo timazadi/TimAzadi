@@ -3,7 +3,6 @@
 دروازه (Gateway) سریع و مدرن برای تونل‌زنی VLESS روی WebSocket و XHTTP، با داشبورد مدیریتی و قابلیت ساخت لینک‌های اختصاصی با محدودیت ترافیک.
 
 لینک ویدیو اموزش
-https://youtu.be/nTq2vDmC0Ks
 
 ---
 
@@ -21,9 +20,7 @@ https://youtu.be/nTq2vDmC0Ks
 
 ## 1️⃣ Fork روی گیت‌هاب
 
-```bash
-https://github.com/arvin341az-glitch/RVG/
-```
+
 
 ## 2️⃣ Deploy روی Railway
 
@@ -81,13 +78,3 @@ State (لینک‌ها، آمار مصرف، رمز عبور، secret) روی ف
 - حذف پیام‌های خطای اختصاصی (مثل `"not authorized"`) که امضای این کدبیس بودند، و جایگزینی با پاسخ‌های عمومی‌تر (404 ساده) در برابر active-probing.
 
 اگر بعداً به یک VPS با دسترسی کامل به TCP/UDP خام مهاجرت کردید (به‌جای Railway)، REALITY و Hysteria2 گزینه‌های واقعاً قابل‌اجرا می‌شوند و می‌توانیم آن‌ها را اضافه کنیم.
-
----
-
-<p align="center">ساخته‌شده با ❤️ توسط <b>codebox</b></p>
-
-## 💰 حمایت مالی (Donate)
-
-https://wallets.arvin341az.workers.dev
-
-🙏 از حمایت شما متشکریم!
