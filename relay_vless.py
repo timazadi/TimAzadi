@@ -303,11 +303,11 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             import socket
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
-                # ✅ فیکس: قبلاً ۲MB بود؛ با سقف سراسری کانکشن جدید هم ترکیب می‌شود ولی
-                # همچنان هرچه بافر هر کانکشن کوچک‌تر باشد، مصرف کل حافظه زیر بار
-                # پایین‌تر می‌آید. ۱MB برای throughput کافی و امن‌تر برای حافظه است.
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 * 1024 * 1024)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 * 1024 * 1024)
+                # ✅ فیکس دوم: از ۱MB به ۵۱۲KB — هماهنگ با کاهش مشابه در xhttp_siz10.py؛
+                # هرچه بافر هر کانکشن کوچک‌تر باشد، بدترین‌حالتِ مصرف کل حافظه زیر بار
+                # سنگین (صدها کانکشن هم‌زمان) پایین‌تر می‌آید، بدون افت محسوس throughput.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 512 * 1024)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 512 * 1024)
                 if hasattr(socket, "TCP_QUICKACK"):  # فقط لینوکس؛ تاخیر ACK رو حذف می‌کنه
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
             except OSError:
