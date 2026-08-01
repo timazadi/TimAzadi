@@ -92,26 +92,6 @@ LINKS_LOCK = asyncio.Lock()
 # ✅ فیکس: سقف سراسری تعداد کانکشن هم‌زمان پروکسی (VLESS/Trojan روی WS + XHTTP)
 # قبلاً هیچ محدودیتی روی تعداد تونل‌های باز هم‌زمان وجود نداشت. هر تونل تا چند
 # مگابایت بافر (سوکت + صف‌های adaptive-flow) مصرف می‌کند؛ زیر فشار واقعی (موج
-# ورود کاربر) تعداد تونل‌ها می‌توانست بی‌حدوحصر بالا برود و کل حافظه‌ی کانتینر را
-# مصرف کند → OOM kill → Railway ری‌استارت می‌کند و اگر فشار ادامه پیدا کند دوباره
-# OOM می‌خورد، تا بعد از restartPolicyMaxRetries سرویس کاملاً بالا نیاید (دقیقاً
-# همان چیزی که به‌عنوان «بن شدن زیر فشار» گزارش شد). این یک سقف نرم و سراسری است
-# که هم relay_vless.py (WS کلاسیک) و هم xhttp_siz10.py از آن استفاده می‌کنند.
-# با متغیر محیطی MAX_CONCURRENT_CONNECTIONS در Railway قابل تنظیم است.
-#
-# ✅ فیکس جدید: شمارش تعداد کانکشن به‌تنهایی کافی نیست — هر session بسته به نوع
-# ترافیک می‌تواند بافرِ خیلی متفاوتی مصرف کند. راه‌حل واقعی: قبل از قبول هر
-# کانکشن جدید، خودِ RSS واقعی پروسه را چک کن، نه فقط شمارنده را.
-#
-# ✅ به‌جای اینکه از کاربر بخوایم سقف RAM پلن Railway رو حدس بزنه و دستی
-# MEMORY_LIMIT_MB رو ست کنه، اینجا خودمون سقف واقعی رو از خودِ کانتینر
-# می‌خونیم: هر کانتینر لینوکسی (از جمله همه‌ی سرویس‌های Railway) سقف حافظه‌ای
-# که بهش اختصاص داده شده رو توی cgroup منتشر می‌کنه — همون عددی که اگر ازش رد
-# بشیم، کرنل پروسه رو OOM-kill می‌کنه. با خوندن مستقیم از اونجا، دیگه لازم
-# نیست کسی حدس بزنه پلنش چند گیگه.
-MAX_CONCURRENT_CONNECTIONS = int(os.environ.get("MAX_CONCURRENT_CONNECTIONS", "60"))
-MEMORY_SAFETY_MARGIN = 0.85  # فقط تا ۸۵٪ سقف اجازه‌ی کانکشن جدید بده، ۱۵٪ برای burst لحظه‌ای نگه‌دار
-
 # سقف‌های "بدون محدودیت" که cgroup گاهی به‌جای عدد واقعی برمی‌گردونه
 # (یعنی کانتینر هیچ سقف حافظه‌ای نداره) — این‌ها رو باید نادیده بگیریم چون
 # به‌عنوان "سقف واقعی" بی‌معنی‌ان (چند اگزابایت!).
@@ -122,8 +102,8 @@ def _detect_container_memory_limit_mb() -> int:
     """سقف واقعی RAM اختصاص‌داده‌شده به این کانتینر رو خودش پیدا می‌کنه.
     اولویت با override دستی کاربره (MEMORY_LIMIT_MB در Railway Variables)،
     اگر نبود، از فایل‌های cgroup (v2 و بعد v1) می‌خونه. اگر هیچ‌کدوم پیدا
-    نشد (مثلاً روی محیط لوکال/ویندوز)، ۰ برمی‌گردونه یعنی این گارد غیرفعال
-    می‌مونه و فقط سقف شمارشی (MAX_CONCURRENT_CONNECTIONS) اعمال می‌شه."""
+    نشد (مثلاً روی محیط لوکال/ویندوز)، ۰ برمی‌گردونه یعنی سایزینگ خودکار
+    غیرفعال می‌مونه و مقادیر محافظه‌کارانه‌ی پیش‌فرض اعمال می‌شن."""
     override = os.environ.get("MEMORY_LIMIT_MB")
     if override:
         try:
@@ -153,21 +133,21 @@ def _detect_container_memory_limit_mb() -> int:
     except (FileNotFoundError, PermissionError, ValueError, OSError):
         pass
 
-    return 0  # پیدا نشد — گارد غیرفعال می‌مونه تا وقتی کاربر دستی ست کنه
+    return 0  # پیدا نشد — سایزینگ خودکار غیرفعال می‌مونه تا وقتی کاربر دستی ست کنه
 
 
 MEMORY_LIMIT_MB = _detect_container_memory_limit_mb()
 MEMORY_LIMIT_SOURCE = (
     "دستی (MEMORY_LIMIT_MB)" if os.environ.get("MEMORY_LIMIT_MB")
-    else ("تشخیص خودکار از cgroup" if MEMORY_LIMIT_MB > 0 else "تشخیص داده نشد — غیرفعال")
+    else ("تشخیص خودکار از cgroup" if MEMORY_LIMIT_MB > 0 else "تشخیص داده نشد")
 )
 if MEMORY_LIMIT_MB > 0:
     logger.info(f"🧠 سقف حافظه‌ی کانتینر: {MEMORY_LIMIT_MB}MB ({MEMORY_LIMIT_SOURCE})")
 else:
     logger.warning(
         "🧠 نتونستم سقف حافظه‌ی کانتینر رو خودکار تشخیص بدم (نه cgroup پیدا شد نه "
-        "MEMORY_LIMIT_MB دستی ست شده) — memory guard غیرفعاله، فقط سقف شمارشی "
-        "MAX_CONCURRENT_CONNECTIONS اعمال می‌شه"
+        "MEMORY_LIMIT_MB دستی ست شده) — سایزینگ خودکار بافر/کانکشن غیرفعاله، "
+        "مقادیر محافظه‌کارانه‌ی پیش‌فرض اعمال می‌شن"
     )
 
 
@@ -177,14 +157,80 @@ def current_memory_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
+MEMORY_SAFETY_MARGIN = 0.85  # فقط تا ۸۵٪ سقف اجازه‌ی کانکشن جدید بده، ۱۵٪ برای burst لحظه‌ای نگه‌دار
+
+
 def memory_pressure_ok() -> bool:
     """اگر MEMORY_LIMIT_MB نه دستی ست شده نه خودکار پیدا شده (۰)، این چک
-    همیشه True برمی‌گردونه و فقط سقف شمارشی (MAX_CONCURRENT_CONNECTIONS) اعمال
-    می‌شه."""
+    همیشه True برمی‌گردونه."""
     if MEMORY_LIMIT_MB <= 0:
         return True
     return current_memory_mb() < (MEMORY_LIMIT_MB * MEMORY_SAFETY_MARGIN)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ✅ سایزینگ خودکار سقف کانکشن + اندازه‌ی بافر هر تونل، بر اساس RAM واقعی
+# دور اول فیکس‌ها (وقتی سرویس OOM می‌خورد و «بن» می‌شد) بافرها و سقف کانکشن رو
+# به یک عدد ثابتِ خیلی محافظه‌کارانه کاهش داد — این امن بود ولی روی سروری با
+# RAM بیشتر از حد لازم، غیرضروری محافظه‌کار بود: باعث افت کیفیت/سرعت (بافر کوچیک
+# روی لینک‌های پرلتنسی throughput رو محدود می‌کنه) و رد شدن زودهنگام کانکشن‌های
+# جدید هنگام ازدحام می‌شد (که از دید کاربر شبیه قطعی ناگهانی به‌نظر می‌رسه).
+#
+# فیکس درست: چون الان سقف واقعی RAM کانتینر رو داریم (بالاتر تشخیص دادیم)،
+# سقف کانکشن و اندازه‌ی بافر هر تونل رو از روی همون عدد واقعی حساب می‌کنیم،
+# نه یک عدد ثابت حدسی. نتیجه: روی سروری با RAM بیشتر، خودکار بافر بزرگ‌تر و
+# سقف کانکشن بالاتر می‌گیریم (سرعت/کیفیت بهتر + قطعی کمتر زیر ازدحام)، و روی
+# سروری با RAM کم، خودکار محافظه‌کارتر می‌مونیم — بدون نیاز به تنظیم دستی.
+_BASE_APP_OVERHEAD_MB = 180  # تخمین مصرف پایه‌ی خودِ اپ (FastAPI + پنل حجیم pages.py + httpx pool و ...) قبل از هر تونل
+
+# ✅ این عدد رو مستقیم می‌تونی توی Railway Variables با SESSION_BUFFER_MB تنظیم
+# کنی، بدون نیاز به تغییر کد: عدد بزرگ‌تر = هر تونل بافر بزرگ‌تر و سرعت/کیفیت
+# بالاتر ولی ظرفیت کاربر هم‌زمان کمتر؛ عدد کوچیک‌تر = برعکس. پیش‌فرض ۸ حالت
+# متعادلیه (بین نسخه‌ی خیلی محافظه‌کارِ فیکس اول که کیفیت رو افت داده بود، و
+# نسخه‌ی قبل از فیکس که OOM می‌خورد).
+_DEFAULT_SESSION_BUDGET_MB = float(os.environ.get("SESSION_BUFFER_MB", "8"))
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+_env_max_conn = os.environ.get("MAX_CONCURRENT_CONNECTIONS")
+if _env_max_conn:
+    # کاربر خودش صراحتاً سقف کانکشن رو ست کرده — همون رو اولویت بده، ولی بودجه‌ی
+    # هر تونل رو با توجه به RAM واقعی (اگه شناسایی شده) دوباره حساب کن تا بافرها
+    # هم منطقی باشن، نه فقط شمارنده.
+    MAX_CONCURRENT_CONNECTIONS = int(_env_max_conn)
+    _PER_SESSION_BUDGET_MB = (
+        max(2.0, (MEMORY_LIMIT_MB - _BASE_APP_OVERHEAD_MB) / MAX_CONCURRENT_CONNECTIONS)
+        if MEMORY_LIMIT_MB > 0 else _DEFAULT_SESSION_BUDGET_MB
+    )
+elif MEMORY_LIMIT_MB > 0:
+    _usable_mb = max(0.0, MEMORY_LIMIT_MB - _BASE_APP_OVERHEAD_MB)
+    _PER_SESSION_BUDGET_MB = _DEFAULT_SESSION_BUDGET_MB
+    MAX_CONCURRENT_CONNECTIONS = int(_clamp(_usable_mb / _PER_SESSION_BUDGET_MB, 40, 700))
+else:
+    # سقف حافظه شناسایی نشد — چون هیچ اطلاعی از ظرفیت واقعی سرور نداریم، یه
+    # پیش‌فرض متعادل (نه خیلی محافظه‌کار، نه پرریسک) انتخاب می‌کنیم.
+    MAX_CONCURRENT_CONNECTIONS = 80
+    _PER_SESSION_BUDGET_MB = _DEFAULT_SESSION_BUDGET_MB
+
+# بافرهای هر تونل، متناسب با بودجه‌ی محاسبه‌شده بالا — با کف/سقف معقول تا نه
+# خیلی کوچیک بشن (throughput افت کنه) نه خیلی بزرگ (خطر OOM با تعداد بالا).
+# این ثابت‌ها رو xhttp_siz10.py و relay_vless.py مستقیم از اینجا import می‌کنن،
+# پس مقدارشون همیشه با سقف کانکشن بالا هماهنگه (هر دو از یک بودجه مشتق شدن).
+SOCK_BUF_SIZE = int(_clamp(_PER_SESSION_BUDGET_MB * 0.15, 0.3, 3.0) * 1024 * 1024)
+FLOW_MAX_HW = int(_clamp(_PER_SESSION_BUDGET_MB * 0.35, 0.75, 12.0) * 1024 * 1024)
+FLOW_START_HW = FLOW_MAX_HW // 2
+FLOW_MIN_HW = 256 * 1024
+XHTTP_BUF = 512 * 1024
+DOWNLINK_QUEUE_MAX = int(_clamp((_PER_SESSION_BUDGET_MB * 0.4 * 1024 * 1024) / XHTTP_BUF, 6, 96))
+
+logger.info(
+    f"⚙️ سایزینگ خودکار: سقف کانکشن هم‌زمان={MAX_CONCURRENT_CONNECTIONS} | "
+    f"بودجه‌ی هر تونل≈{_PER_SESSION_BUDGET_MB:.1f}MB | سوکت‌بافر={SOCK_BUF_SIZE // 1024}KB | "
+    f"FLOW_MAX_HW={FLOW_MAX_HW // 1024}KB | صف‌دانلینک={DOWNLINK_QUEUE_MAX}×{XHTTP_BUF // 1024}KB"
+)
 
 
 class _ConnLimiter:
@@ -524,8 +570,18 @@ async def save_state():
                 "saved_at": datetime.now().isoformat(),
             }
             tmp = DATA_FILE.with_suffix(".tmp")
+            # ✅ فیکس مهم: json.dumps یک عملیات CPU-bound و synchronous ـه. با
+            # هزاران کانفیگ/کاربر، سریالایز کردنش می‌تونه ده‌ها تا صدها میلی‌ثانیه
+            # طول بکشه. چون قبلاً مستقیم داخل همین تابع async صدا زده می‌شد، در
+            # تمام اون مدت کل event loop — یعنی همه‌ی تونل‌های VLESS/XHTTP فعال،
+            # بات تلگرام، و پنل ادمین — عملاً freeze می‌شدن. این دقیقاً همون چیزیه
+            # که کاربرها به‌صورت «لگ/پرش لحظه‌ای، مستقل از اپراتور» حس می‌کردن،
+            # چون ربطی به کیفیت شبکه‌شون نداشت — خودِ سرور لحظه‌ای هنگ می‌کرد. با
+            # اجرای json.dumps توی یک ترد جدا (asyncio.to_thread)، بقیه‌ی
+            # کانکشن‌ها بدون وقفه به کارشون ادامه می‌دن.
+            payload = await asyncio.to_thread(json.dumps, data, ensure_ascii=False, indent=2)
             async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                await f.write(payload)
             tmp.replace(DATA_FILE)
         except Exception as e:
             logger.warning(f"Could not save state: {e}")
