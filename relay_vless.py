@@ -26,6 +26,7 @@ from state import (
     record_traffic,
     is_domain_blocked,
     CONN_LIMITER,  # ✅ سقف سراسری تعداد کانکشن هم‌زمان (جلوگیری از OOM زیر فشار)
+    SOCK_BUF_SIZE,  # ✅ بافر سوکت — از state.py می‌آد، خودکار متناسب با RAM واقعی حساب می‌شه
 )
 import time
 
@@ -303,11 +304,10 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             import socket
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
-                # ✅ فیکس دوم: از ۱MB به ۵۱۲KB — هماهنگ با کاهش مشابه در xhttp_siz10.py؛
-                # هرچه بافر هر کانکشن کوچک‌تر باشد، بدترین‌حالتِ مصرف کل حافظه زیر بار
-                # سنگین (صدها کانکشن هم‌زمان) پایین‌تر می‌آید، بدون افت محسوس throughput.
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 512 * 1024)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 512 * 1024)
+                # ✅ دیگه عدد ثابت نیست — SOCK_BUF_SIZE از state.py می‌آد و خودکار
+                # متناسب با RAM واقعی سرور تنظیم می‌شه (هماهنگ با xhttp_siz10.py).
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF_SIZE)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCK_BUF_SIZE)
                 if hasattr(socket, "TCP_QUICKACK"):  # فقط لینوکس؛ تاخیر ACK رو حذف می‌کنه
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
             except OSError:
