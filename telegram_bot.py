@@ -39,10 +39,38 @@ OWNER_USERNAME = "uimmd"
 # واحدهایی که کاربر می‌تواند برای برداشت هدیه‌ی ورودش انتخاب کند.
 GIFT_UNITS = {"MB": 1024 ** 2, "GB": 1024 ** 3}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ✅ فیکس: قبلاً _pending_referrer و _wizard دیکشنری‌های ساده بودن که فقط با
+# pop صریح خالی می‌شدن. اگر کاربری یک فلو (مثلاً «افزودن کانفیگ» یا رفرال در
+# انتظار) رو شروع می‌کرد ولی نصفه‌کاره رهاش می‌کرد (مثلاً چت رو می‌بست)، همون
+# entry برای همیشه توی حافظه می‌موند. با گذشت زمان و رشد تعداد کاربرها، این یه
+# نشتی حافظه‌ی آهسته و پیوسته‌ست — دقیقاً همون الگویی که قبلاً توی rate_limiter.py
+# برای IP-ها فیکس شد. _TTLDict همون رفتار dict معمولی رو داره (get/pop/[]) پس
+# نیازی به تغییر جاهای دیگه‌ی کد نبود، فقط یک متد prune() اضافه داره که توسط
+# housekeeping_loop پایین‌تر صدا زده می‌شه.
+class _TTLDict(dict):
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.__dict__.setdefault("_ts", {})[key] = time.monotonic()
+
+    def pop(self, key, default=None):
+        self.__dict__.get("_ts", {}).pop(key, None)
+        return super().pop(key, default)
+
+    def prune(self, max_idle: float) -> int:
+        ts = self.__dict__.get("_ts", {})
+        now = time.monotonic()
+        stale = [k for k, t in ts.items() if now - t > max_idle]
+        for k in stale:
+            self.pop(k, None)
+        return len(stale)
+
+
 # رفرال در حال انتظار: وقتی کاربر با /start ref_<id> وارد می‌شه ولی هنوز عضویت کانال
 # رو تایید نکرده، اینجا نگه می‌داریم تا بعد از ساخته‌شدن کانفیگش، رفرال ثبت بشه.
-# فقط در حافظه است (نیازی به ماندگاری ندارد چون فلوی onboarding کوتاهه).
-_pending_referrer: dict[str, str] = {}
+# فقط در حافظه است (نیازی به ماندگاری ندارد چون فلوی onboarding کوتاهه) —
+# اگر کاربر هیچ‌وقت عضویتش رو تایید نکنه، housekeeping_loop بعد از یک ساعت پاکش می‌کنه.
+_pending_referrer: "_TTLDict" = _TTLDict()
 
 # کش نام‌نمایشی هر chat_id — برای اینکه وقتی می‌خوایم رفرال یک نفر رو با اسمش توی
 # لیدربورد نشون بدیم، لازم نیست همون لحظه از تلگرام getChat بگیریم.
@@ -55,8 +83,50 @@ def _remember_display_name(chat_id, from_user: dict | None):
     name = " ".join(filter(None, [from_user.get("first_name"), from_user.get("last_name")])).strip()
     _display_names[str(chat_id)] = {"name": name or str(chat_id), "username": from_user.get("username") or ""}
 _offset = 0
-_wizard: dict[str, dict] = {}
+# ویزارد ادمین/کاربر (مراحل چندقدمی مثل «افزودن کانفیگ»، «پیام همگانی» و ...) —
+# رها شده‌ها بعد از WIZARD_IDLE_TTL توسط housekeeping_loop پاک می‌شن.
+_wizard: "_TTLDict" = _TTLDict()
 _running = False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ✅ فیچر: ضد اسپم — قبلاً هیچ سقفی روی تعداد پیام/کلیکی که یک کاربر در واحد
+# زمان می‌فرستاد نبود. یک کاربر (عمدی یا با یه کلاینت باگ‌دار که پیام رو
+# چندبار می‌فرسته) می‌تونست با ارسال سریع ده‌ها پیام/callback پشت‌سرهم، حجم
+# زیادی کار async (هرکدوم شامل چند تا await _api → درخواست HTTP واقعی به
+# تلگرام) روی سرور تحمیل کنه و صف پردازش رو برای بقیه‌ی کاربرها کند کنه، چون
+# polling_loop آپدیت‌ها رو پشت‌سرهم پردازش می‌کنه. این یک sliding-window ساده،
+# شبیه rate_limiter.py، ولی مخصوص هر chat_id تلگرام (نه IP). ادمین‌ها معافن
+# چون تعدادشون کمه و کارهای مدیریتی نباید بخاطر این گیر کنه.
+_FLOOD_LIMIT = 8            # حداکثر ۸ پیام/کلیک مجاز
+_FLOOD_WINDOW = 10.0        # در هر ۱۰ ثانیه
+_flood_store: dict[str, list] = {}
+_flood_calls_since_cleanup = 0
+_FLOOD_CLEANUP_EVERY = 300
+
+
+def _flood_check(chat_id) -> bool:
+    """True یعنی این پیام/کلیک اجازه‌ی پردازش داره. اگر از سقف رد شده باشه،
+    بی‌صدا نادیده گرفته می‌شه (نه پیام خطا — چون خودِ پیام خطا هم می‌تونه به
+    اسپم دامن بزنه)."""
+    global _flood_calls_since_cleanup
+    key = str(chat_id)
+    now = time.monotonic()
+    bucket = _flood_store.setdefault(key, [])
+    bucket[:] = [t for t in bucket if now - t < _FLOOD_WINDOW]
+    allowed = len(bucket) < _FLOOD_LIMIT
+    if allowed:
+        bucket.append(now)
+    # پاک‌سازی دوره‌ای IPـهای/کاربرهای غیرفعال، دقیقاً مثل الگوی rate_limiter.py —
+    # وگرنه _flood_store برای هر کاربری که تا حالا یک پیام فرستاده، تا ابد بزرگ می‌شه.
+    _flood_calls_since_cleanup += 1
+    if _flood_calls_since_cleanup >= _FLOOD_CLEANUP_EVERY:
+        _flood_calls_since_cleanup = 0
+        stale = [k for k, v in _flood_store.items() if not v]
+        for k in stale:
+            _flood_store.pop(k, None)
+    return allowed
+
+
 
 
 def _allowed_chats() -> set[str]:
@@ -816,6 +886,21 @@ _BOTTOM_BUTTON_TEXTS = {
 }
 
 
+async def _run_broadcast(admin_chat_id, targets: list, msg: str):
+    """پیام همگانی رو در پس‌زمینه (background task) می‌فرسته، نه inline داخل
+    پردازش آپدیت — تا بقیه‌ی کاربرها هم‌زمان بتونن با بات کار کنن."""
+    sent, failed = 0, 0
+    for user_id in targets:
+        res = await _send(user_id, msg)
+        if res is not None:
+            sent += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)  # ضد رگبار به API تلگرام تا ریت‌لیمیت/بن نشیم
+    await _send(admin_chat_id, f"✅ تموم شد. ارسال موفق: {sent} | ناموفق: {failed}")
+    log_activity("system", f"پیام همگانی توسط ادمین {admin_chat_id} برای {len(targets)} کاربر ارسال شد", "ok")
+
+
 async def _handle_text(chat_id, text, is_admin: bool = False, from_user: dict | None = None, chat_type: str = "private"):
     w = _wizard.get(str(chat_id))
     text = (text or "").strip()
@@ -949,17 +1034,13 @@ async def _handle_text(chat_id, text, is_admin: bool = False, from_user: dict | 
             return
         async with LINKS_LOCK:
             targets = sorted({d.get("join_user") for d in LINKS.values() if d.get("join_user")})
-        await _send(chat_id, f"⏳ در حال ارسال برای {len(targets)} کاربر...")
-        sent, failed = 0, 0
-        for user_id in targets:
-            res = await _send(user_id, msg)
-            if res is not None:
-                sent += 1
-            else:
-                failed += 1
-            await asyncio.sleep(0.05)  # ضد رگبار به API تلگرام تا ریت‌لیمیت/بن نشیم
-        await _send(chat_id, f"✅ تموم شد. ارسال موفق: {sent} | ناموفق: {failed}")
-        log_activity("system", f"پیام همگانی توسط ادمین {chat_id} برای {len(targets)} کاربر ارسال شد", "ok")
+        await _send(chat_id, f"⏳ در حال ارسال برای {len(targets)} کاربر در پس‌زمینه — بات همزمان به بقیه‌ی کاربرها هم جواب می‌ده...")
+        # ✅ فیکس: قبلاً این حلقه inline (داخل همون پردازش آپدیت) اجرا می‌شد. چون
+        # polling_loop آپدیت‌ها رو پشت‌سرهم پردازش می‌کنه، broadcast به چند هزار
+        # کاربر (با فاصله‌ی 0.05s بین هرکدوم) می‌تونست چند دقیقه طول بکشه و در
+        # تمام این مدت بات برای هیچ کاربر دیگه‌ای (even خودِ ادمین) جواب نمی‌داد.
+        # حالا به‌صورت یک task مستقل در پس‌زمینه اجرا می‌شه.
+        asyncio.create_task(_run_broadcast(chat_id, targets, msg))
     elif step == "ref_bonus_wait":
         _wizard.pop(str(chat_id), None)
         try:
@@ -1424,12 +1505,20 @@ async def _process_update(update: dict):
         if "callback_query" in update:
             cq = update["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
+            is_admin = _is_admin(chat_id)
+            if not is_admin and not _flood_check(chat_id):
+                # بی‌صدا نادیده می‌گیریم؛ فقط لودینگ روی دکمه رو (بی‌صدا) می‌بندیم
+                # تا برای کاربر لوپ لودینگ نمونه.
+                await _answer_cb(cq["id"])
+                return
             _remember_display_name(chat_id, cq.get("from") or {})
-            await _handle_callback(chat_id, cq["message"]["message_id"], cq["id"], cq.get("data", ""), _is_admin(chat_id))
+            await _handle_callback(chat_id, cq["message"]["message_id"], cq["id"], cq.get("data", ""), is_admin)
         elif "message" in update:
             msg = update["message"]
             chat_id = msg["chat"]["id"]
             chat_type = msg["chat"].get("type", "private")
+            if not _is_admin(chat_id) and not _flood_check(chat_id):
+                return  # بی‌صدا نادیده می‌گیریم — پیام هشدار هم خودش می‌تونه اسپم بشه
             await _handle_text(chat_id, msg.get("text", ""), _is_admin(chat_id), msg.get("from") or {}, chat_type)
     except Exception as e:
         logger.warning(f"telegram_bot: process_update error: {e}")
@@ -1495,6 +1584,27 @@ async def polling_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 CHANNEL_WATCH_INTERVAL = 600   # هر ۱۰ دقیقه یک دور کامل چک
 CHANNEL_WATCH_STAGGER = 0.35   # فاصله بین هر getChatMember تا به API تلگرام فشار نیاریم و ریت‌لیمیت/بن نشیم
+
+# ✅ فیچر: پاک‌سازی دوره‌ای state‌های موقتی رهاشده. بدون این، هر کاربری که یک
+# فلوی چندمرحله‌ای (ویزارد) یا رفرال در انتظار رو شروع کنه و نصفه‌کاره رها
+# کنه، برای همیشه یک entry تو حافظه می‌مونه — با رشد تعداد کاربرها در طول
+# ماه‌ها، این خودش یه نشتی حافظه‌ی آهسته و پیوسته می‌شه.
+WIZARD_IDLE_TTL = 1800     # ۳۰ دقیقه بی‌فعالیت → ویزارد رهاشده حساب می‌شه
+PENDING_REF_TTL = 3600     # ۱ ساعت — بیشتر از این یعنی onboarding کاربر کامل نشده
+HOUSEKEEPING_INTERVAL = 300  # هر ۵ دقیقه
+
+
+async def housekeeping_loop():
+    logger.info("telegram_bot: housekeeping_loop started")
+    while True:
+        await asyncio.sleep(HOUSEKEEPING_INTERVAL)
+        try:
+            n1 = _wizard.prune(WIZARD_IDLE_TTL)
+            n2 = _pending_referrer.prune(PENDING_REF_TTL)
+            if n1 or n2:
+                logger.info(f"telegram_bot: housekeeping پاک کرد → ویزارد رهاشده={n1}, رفرال رهاشده={n2}")
+        except Exception as e:
+            logger.warning(f"telegram_bot: housekeeping_loop error: {e}")
 
 
 async def channel_watch_loop():
