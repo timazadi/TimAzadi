@@ -33,6 +33,7 @@ from state import (
     create_join_link, check_channel_membership,
     PUBLIC_SETTINGS,
     FILTER_SETTINGS, refresh_adult_blocklist,
+    current_memory_mb, MEMORY_LIMIT_MB, MEMORY_LIMIT_SOURCE, CONN_LIMITER,  # ✅ برای لاگ دوره‌ای مصرف حافظه
 )
 
 from rate_limiter import check_rate_limit
@@ -225,6 +226,29 @@ async def telegram_notifier_loop():
             logger.warning(f"telegram_notifier_loop error: {e}")
         await asyncio.sleep(300)
 
+# ✅ فیچر جدید: لاگ دوره‌ای مصرف حافظه‌ی واقعی پروسه. هدف این‌که وقتی سرویس
+# دوباره زیر بار می‌رود، توی لاگ Railway (تب Deployments → Logs) روند مصرف RAM
+# رو قبل از هر OOM ببینی — نه اینکه فقط بعد از کرش حدس بزنی. با MEMORY_LIMIT_MB
+# هم مقایسه می‌کنه تا بفهمی چقدر به سقفی که خودت ست کردی نزدیکه.
+async def memory_monitor_loop():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            mb = current_memory_mb()
+            conn_count = len(connections)
+            limit_note = f" / سقف={MEMORY_LIMIT_MB}MB ({MEMORY_LIMIT_SOURCE})" if MEMORY_LIMIT_MB > 0 else " (سقف حافظه تشخیص داده نشد)"
+            logger.info(
+                f"📊 memory: RSS≈{mb:.0f}MB{limit_note} | کانکشن فعال={conn_count} "
+                f"({CONN_LIMITER.count}/{CONN_LIMITER.limit})"
+            )
+            if MEMORY_LIMIT_MB > 0 and mb > MEMORY_LIMIT_MB * 0.75:
+                logger.warning(
+                    f"⚠️ مصرف حافظه به {mb:.0f}MB رسیده (بیش از ۷۵٪ سقف {MEMORY_LIMIT_MB}MB) — "
+                    f"در حال رد کردن کانکشن‌های جدید نزدیک سقف"
+                )
+        except Exception as e:
+            logger.warning(f"memory_monitor_loop error: {e}")
+
 @app.on_event("startup")
 async def startup():
     global http_client
@@ -238,6 +262,7 @@ async def startup():
         logger.warning("ADMIN_PASSWORD در env تنظیم نشده")
     log_activity("system", "سرور راه‌اندازی شد", "ok")
     asyncio.create_task(telegram_notifier_loop())
+    asyncio.create_task(memory_monitor_loop())
     if FILTER_SETTINGS.get("block_adult"):
         # اگه ادمین قبلاً فیلتر بزرگسال رو فعال کرده، همون اول لیست رو در پس‌زمینه دانلود کن
         # (بدون این‌که استارتاپ سرور رو معطل کنه)
@@ -246,6 +271,7 @@ async def startup():
         import telegram_bot
         asyncio.create_task(telegram_bot.polling_loop())
         asyncio.create_task(telegram_bot.channel_watch_loop())
+        asyncio.create_task(telegram_bot.housekeeping_loop())
     except Exception as e:
         # اگر بات تلگرام هر مشکلی داشت (توکن غلط، خطای import و ...) نباید کل سرور
         # بالا نیاید؛ فقط این قسمت غیرفعال می‌ماند و بقیه‌ی پنل کار می‌کند.
