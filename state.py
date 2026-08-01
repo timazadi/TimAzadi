@@ -6,6 +6,7 @@ import os
 import re
 import hashlib
 import hmac
+import resource  # ✅ برای پایش RSS واقعی پروسه (memory guard) — فقط لینوکس/یونیکس، روی کانتینر Railway مشکلی نداره
 import secrets
 import time
 import aiofiles
@@ -97,6 +98,95 @@ LINKS_LOCK = asyncio.Lock()
 # همان چیزی که به‌عنوان «بن شدن زیر فشار» گزارش شد). این یک سقف نرم و سراسری است
 # که هم relay_vless.py (WS کلاسیک) و هم xhttp_siz10.py از آن استفاده می‌کنند.
 # با متغیر محیطی MAX_CONCURRENT_CONNECTIONS در Railway قابل تنظیم است.
+#
+# ✅ فیکس جدید: شمارش تعداد کانکشن به‌تنهایی کافی نیست — هر session بسته به نوع
+# ترافیک می‌تواند بافرِ خیلی متفاوتی مصرف کند. راه‌حل واقعی: قبل از قبول هر
+# کانکشن جدید، خودِ RSS واقعی پروسه را چک کن، نه فقط شمارنده را.
+#
+# ✅ به‌جای اینکه از کاربر بخوایم سقف RAM پلن Railway رو حدس بزنه و دستی
+# MEMORY_LIMIT_MB رو ست کنه، اینجا خودمون سقف واقعی رو از خودِ کانتینر
+# می‌خونیم: هر کانتینر لینوکسی (از جمله همه‌ی سرویس‌های Railway) سقف حافظه‌ای
+# که بهش اختصاص داده شده رو توی cgroup منتشر می‌کنه — همون عددی که اگر ازش رد
+# بشیم، کرنل پروسه رو OOM-kill می‌کنه. با خوندن مستقیم از اونجا، دیگه لازم
+# نیست کسی حدس بزنه پلنش چند گیگه.
+MAX_CONCURRENT_CONNECTIONS = int(os.environ.get("MAX_CONCURRENT_CONNECTIONS", "60"))
+MEMORY_SAFETY_MARGIN = 0.85  # فقط تا ۸۵٪ سقف اجازه‌ی کانکشن جدید بده، ۱۵٪ برای burst لحظه‌ای نگه‌دار
+
+# سقف‌های "بدون محدودیت" که cgroup گاهی به‌جای عدد واقعی برمی‌گردونه
+# (یعنی کانتینر هیچ سقف حافظه‌ای نداره) — این‌ها رو باید نادیده بگیریم چون
+# به‌عنوان "سقف واقعی" بی‌معنی‌ان (چند اگزابایت!).
+_CGROUP_NO_LIMIT_THRESHOLD = 1 << 40  # 1TB — هر عدد بالاتر از این یعنی "بدون سقف"
+
+
+def _detect_container_memory_limit_mb() -> int:
+    """سقف واقعی RAM اختصاص‌داده‌شده به این کانتینر رو خودش پیدا می‌کنه.
+    اولویت با override دستی کاربره (MEMORY_LIMIT_MB در Railway Variables)،
+    اگر نبود، از فایل‌های cgroup (v2 و بعد v1) می‌خونه. اگر هیچ‌کدوم پیدا
+    نشد (مثلاً روی محیط لوکال/ویندوز)، ۰ برمی‌گردونه یعنی این گارد غیرفعال
+    می‌مونه و فقط سقف شمارشی (MAX_CONCURRENT_CONNECTIONS) اعمال می‌شه."""
+    override = os.environ.get("MEMORY_LIMIT_MB")
+    if override:
+        try:
+            val = int(override)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+
+    # cgroup v2 — فرمت کانتینرهای مدرن (از جمله Railway)
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            raw = f.read().strip()
+        if raw and raw != "max":
+            limit_bytes = int(raw)
+            if 0 < limit_bytes < _CGROUP_NO_LIMIT_THRESHOLD:
+                return limit_bytes // (1024 * 1024)
+    except (FileNotFoundError, PermissionError, ValueError, OSError):
+        pass
+
+    # cgroup v1 — fallback برای کانتینرهای قدیمی‌تر
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+            limit_bytes = int(f.read().strip())
+        if 0 < limit_bytes < _CGROUP_NO_LIMIT_THRESHOLD:
+            return limit_bytes // (1024 * 1024)
+    except (FileNotFoundError, PermissionError, ValueError, OSError):
+        pass
+
+    return 0  # پیدا نشد — گارد غیرفعال می‌مونه تا وقتی کاربر دستی ست کنه
+
+
+MEMORY_LIMIT_MB = _detect_container_memory_limit_mb()
+MEMORY_LIMIT_SOURCE = (
+    "دستی (MEMORY_LIMIT_MB)" if os.environ.get("MEMORY_LIMIT_MB")
+    else ("تشخیص خودکار از cgroup" if MEMORY_LIMIT_MB > 0 else "تشخیص داده نشد — غیرفعال")
+)
+if MEMORY_LIMIT_MB > 0:
+    logger.info(f"🧠 سقف حافظه‌ی کانتینر: {MEMORY_LIMIT_MB}MB ({MEMORY_LIMIT_SOURCE})")
+else:
+    logger.warning(
+        "🧠 نتونستم سقف حافظه‌ی کانتینر رو خودکار تشخیص بدم (نه cgroup پیدا شد نه "
+        "MEMORY_LIMIT_MB دستی ست شده) — memory guard غیرفعاله، فقط سقف شمارشی "
+        "MAX_CONCURRENT_CONNECTIONS اعمال می‌شه"
+    )
+
+
+def current_memory_mb() -> float:
+    """RSS واقعی پروسه به مگابایت. روی لینوکس ru_maxrss کیلوبایته (روی
+    macOS بایته، ولی کانتینر Railway همیشه لینوکسه پس این فرض امنه)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+
+def memory_pressure_ok() -> bool:
+    """اگر MEMORY_LIMIT_MB نه دستی ست شده نه خودکار پیدا شده (۰)، این چک
+    همیشه True برمی‌گردونه و فقط سقف شمارشی (MAX_CONCURRENT_CONNECTIONS) اعمال
+    می‌شه."""
+    if MEMORY_LIMIT_MB <= 0:
+        return True
+    return current_memory_mb() < (MEMORY_LIMIT_MB * MEMORY_SAFETY_MARGIN)
+
+
+
 class _ConnLimiter:
     def __init__(self, limit: int):
         self.limit = limit
@@ -107,6 +197,16 @@ class _ConnLimiter:
         async with self._lock:
             if self.count >= self.limit:
                 return False
+            if not memory_pressure_ok():
+                # ✅ رد کردن کانکشنِ جدید به‌خاطر فشار حافظه، حتی اگر هنوز به سقف
+                # شمارشی نرسیده باشیم — این دقیقاً همون سناریوییه که با یک عدد
+                # ثابت (250) قابل تشخیص نبود: تعداد کانکشن کم بود ولی هرکدوم
+                # سنگین بودن و داشت به OOM نزدیک می‌شد.
+                logger.warning(
+                    f"🚫 اتصال جدید رد شد: فشار حافظه (RSS≈{current_memory_mb():.0f}MB, "
+                    f"سقف={MEMORY_LIMIT_MB}MB, count={self.count}/{self.limit})"
+                )
+                return False
             self.count += 1
             return True
 
@@ -116,7 +216,6 @@ class _ConnLimiter:
                 self.count -= 1
 
 
-MAX_CONCURRENT_CONNECTIONS = int(os.environ.get("MAX_CONCURRENT_CONNECTIONS", "250"))
 CONN_LIMITER = _ConnLimiter(MAX_CONCURRENT_CONNECTIONS)
 
 SUBS: dict = {}
