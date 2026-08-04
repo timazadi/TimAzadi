@@ -1,0 +1,52 @@
+# این فایل رو توی مسیر .github/workflows/docker-publish.yml توی ریپازیتوری قرار بده.
+#
+# با هر push به main، یک ایمیج داکر می‌سازه و به GitHub Container Registry
+# (ghcr.io) پوش می‌کنه — بدون نیاز به هیچ سکرت اضافه‌ای، چون از GITHUB_TOKEN
+# پیش‌فرض استفاده می‌کنه.
+#
+# بعد از اولین اجرا، برو به:
+#   github.com/timazadi -> پروفایل -> Packages -> timazadi (ایمیج)
+#   -> Package settings -> Change visibility -> Public
+# تا Railway بتونه بدون لاگین، ایمیج رو pull کنه.
+
+name: Build and Publish Docker Image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/timazadi
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
