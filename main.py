@@ -34,11 +34,15 @@ from state import (
     PUBLIC_SETTINGS,
     FILTER_SETTINGS, refresh_adult_blocklist,
     current_memory_mb, MEMORY_LIMIT_MB, MEMORY_LIMIT_SOURCE, CONN_LIMITER,  # ✅ برای لاگ دوره‌ای مصرف حافظه
+    get_public_domain,  # ✅ تشخیص دامنه‌ی عمومی مستقل از پلتفرم (Railway/Render/...)
 )
 
 from rate_limiter import check_rate_limit
 
-_public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+# روی Render دامنه در RENDER_EXTERNAL_HOSTNAME است، روی Railway در
+# RAILWAY_PUBLIC_DOMAIN؛ get_public_domain() هر دو (و override دستی PUBLIC_HOST) را
+# پوشش می‌دهد تا همین کد بدون تغییر روی هرکدام کار کند.
+_public_domain = get_public_domain()
 _extra_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = list({
     *( [f"https://{_public_domain}"] if _public_domain else [] ),
