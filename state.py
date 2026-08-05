@@ -6,7 +6,7 @@ import os
 import re
 import hashlib
 import hmac
-import resource  # ✅ برای پایش RSS واقعی پروسه (memory guard) — فقط لینوکس/یونیکس، روی کانتینر Railway مشکلی نداره
+import resource  # ✅ برای پایش RSS واقعی پروسه (memory guard) — فقط لینوکس/یونیکس، روی کانتینر Railway یا Render مشکلی نداره
 import secrets
 import time
 import aiofiles
@@ -56,16 +56,32 @@ def _load_or_create_secret() -> str:
         secret_file.write_text(new_secret, encoding="utf-8")
         return new_secret
     except Exception as e:
-        # اگر اینجا افتاد یعنی /data (یا DATA_DIR) روی Railway به یک Volume دائمی وصل نیست
-        # و SECRET_KEY هم در env تنظیم نشده. در این حالت این مقدار در هر ری‌استارت عوض می‌شود
-        # که باعث می‌شود «لینک پیش‌فرض» تکراری ساخته شود. بهتره SECRET_KEY رو در Railway Variables ست کنی.
+        # اگر اینجا افتاد یعنی /data (یا DATA_DIR) روی پلتفرم دیپلوی (Railway/Render) به
+        # یک Volume/Disk دائمی وصل نیست و SECRET_KEY هم در env تنظیم نشده. در این حالت این
+        # مقدار در هر ری‌استارت عوض می‌شود که باعث می‌شود «لینک پیش‌فرض» تکراری ساخته شود.
+        # بهتره SECRET_KEY رو در Environment Variables (Railway Variables یا Render
+        # Environment) ست کنی.
         print(f"[warn] could not persist secret key ({e}); using an ephemeral one — set SECRET_KEY env var to avoid this")
         return secrets.token_urlsafe(32)
+
+def get_public_domain() -> str | None:
+    """
+    دامنه عمومی سرویس را از متغیرهای محیطی پلتفرم دیپلوی تشخیص می‌دهد، مستقل از
+    اینکه روی Railway اجرا شده یا Render (یا هر پلتفرم دیگری).
+    اولویت: PUBLIC_HOST (دستی، همیشه اولویت با کاربر) > RAILWAY_PUBLIC_DOMAIN
+    (Railway) > RENDER_EXTERNAL_HOSTNAME (Render). اگر هیچ‌کدام ست نشده بود None
+    برمی‌گرداند (یعنی هنوز دامنه‌ی عمومی مشخص نیست).
+    """
+    return (
+        os.environ.get("PUBLIC_HOST")
+        or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        or os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    ) or None
 
 CONFIG = {
     "port": int(os.environ.get("PORT", 8000)),
     "secret": _load_or_create_secret(),
-    "host": os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost"),
+    "host": get_public_domain() or "localhost",
 }
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -437,14 +453,16 @@ def _initial_admin_password() -> str:
         return env_pw
     # طبق درخواست، پسورد پیش‌فرض (وقتی ADMIN_PASSWORD در env ست نشده) روی "mohammad" است.
     # ⚠️ توجه امنیتی: این یک پسورد ثابت و قابل‌حدس است. اگر پنل ادمین روی یک دامنه‌ی
-    # عمومی (مثل Railway) در دسترس باشد، حتماً یکی از این دو کار را انجام بده:
+    # عمومی (روی Railway، Render یا هرجای دیگر) در دسترس باشد، حتماً یکی از این دو
+    # کار را انجام بده:
     #   ۱) از همین الان، از بخش «تغییر رمز» در پنل یک پسورد قوی‌تر بگذار، یا
-    #   ۲) متغیر ADMIN_PASSWORD را در Railway → Variables ست کن (این مقدار همیشه اولویت دارد).
+    #   ۲) متغیر ADMIN_PASSWORD را در Environment Variables پلتفرم (Railway
+    #      Variables یا Render Environment) ست کن (این مقدار همیشه اولویت دارد).
     fallback = "mohammad"
     logger.warning(
         "⚠️  ADMIN_PASSWORD در env تنظیم نشده — پسورد پیش‌فرض 'mohammad' فعال است. "
         "این پسورد قابل‌حدس است؛ در اسرع وقت از بخش تغییر رمز پنل عوضش کن یا "
-        "ADMIN_PASSWORD را در Railway Variables ست کن."
+        "ADMIN_PASSWORD را در Environment Variables (Railway/Render) ست کن."
     )
     return fallback
 
@@ -587,13 +605,14 @@ async def save_state():
             logger.warning(f"Could not save state: {e}")
 
 def get_host() -> str:
-    return os.environ.get("RAILWAY_PUBLIC_DOMAIN", CONFIG["host"])
+    return get_public_domain() or CONFIG["host"]
 
 def get_extra_hosts() -> list[str]:
     """
-    دامنه‌های پشتیبان اضافی (مثلاً چند دامنه‌ی دیگر Railway یا دامنه‌ی شخصی که به همین
-    سرویس اشاره می‌کنند). با EXTRA_DOMAINS در Railway Variables تنظیم می‌شود، جدا شده با
-    کاما، مثلاً: EXTRA_DOMAINS=backup1.up.railway.app,backup2.up.railway.app
+    دامنه‌های پشتیبان اضافی (مثلاً چند دامنه‌ی دیگر Railway/Render یا دامنه‌ی شخصی که
+    به همین سرویس اشاره می‌کنند). با EXTRA_DOMAINS در Environment Variables تنظیم
+    می‌شود، جدا شده با کاما، مثلاً:
+    EXTRA_DOMAINS=backup1.up.railway.app,backup2.onrender.com
     هدف: اگر یک دامنه فیلتر/بلاک شد، کاربر همین الان در همون ساب‌اسکریپشن یک سرور
     جایگزین دارد و منتظر آپدیت دستی نمی‌ماند.
     """
