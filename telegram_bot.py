@@ -201,8 +201,10 @@ def _safe_host() -> str:
     host = get_host()
     if not host or host == "localhost":
         logger.warning(
-            "RAILWAY_PUBLIC_DOMAIN تنظیم نشده — لینک‌های ساخته‌شده ممکن است نادرست باشند؛ "
-            "این متغیر را در Railway تنظیم کن."
+            "دامنه‌ی عمومی تشخیص داده نشد — لینک‌های ساخته‌شده ممکن است نادرست باشند؛ "
+            "روی Railway متغیر RAILWAY_PUBLIC_DOMAIN و روی Render متغیر "
+            "RENDER_EXTERNAL_HOSTNAME به‌صورت خودکار ست می‌شود؛ اگر روی پلتفرم دیگری "
+            "هستی، PUBLIC_HOST را دستی تنظیم کن."
         )
     return host
 
