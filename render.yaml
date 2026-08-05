@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: azadi-gateway
+    runtime: python
+    plan: starter
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # اجباری: از دستور `openssl rand -base64 32` یک مقدار تصادفی بساز و همینجا
+      # ست کن، یا با generateValue بذار Render خودش بسازه (زیر همین‌طور تنظیم شده).
+      - key: SECRET_KEY
+        generateValue: true
+      # اجباری: رمز ورود پنل ادمین — قبل از دیپلوی حتماً در Render Dashboard
+      # (Environment) این مقدار را با یک رمز واقعی جایگزین کن.
+      - key: ADMIN_PASSWORD
+        sync: false
+      # اختیاری ولی پیشنهادی: توکن و چت‌آیدی بات تلگرام، اگر استفاده می‌کنی.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATA_DIR
+        value: /data
+      # RENDER_EXTERNAL_HOSTNAME را خود Render به‌صورت خودکار ست می‌کند؛ نیازی به
+      # تنظیم دستی نیست. اگر روی دامنه‌ی اختصاصی خودت هستی و می‌خواهی همان به‌جای
+      # دامنه‌ی onrender.com استفاده شود، PUBLIC_HOST را دستی ست کن (بدون https://،
+      # فقط خود دامنه، مثلاً: gateway.example.com).
+      # - key: PUBLIC_HOST
+      #   value: gateway.example.com
+    disk:
+      name: azadi-data
+      mountPath: /data
+      sizeGB: 1
